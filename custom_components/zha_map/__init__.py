@@ -109,14 +109,6 @@ async def async_setup(hass, config):
     return True
 
 
-async def async_setup_entry(hass, config_entry):
-    """Set up zha_map."""
-
-    LOGGER.info("in async_setup_entry")
-
-    return True
-
-
 class TopologyBuilder(LogMixin):
     """Keeps track of topology."""
 
