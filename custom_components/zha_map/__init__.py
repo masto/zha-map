@@ -7,6 +7,7 @@ from datetime import timedelta
 import voluptuous as vol
 import zigpy.exceptions as zigpy_exc
 
+from homeassistant import const as ha_const
 from homeassistant.components import websocket_api
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.util.json import save_json
@@ -33,58 +34,85 @@ async def async_setup(hass, config):
     if DOMAIN not in config:
         return True
 
-    try:
-        zha_gateway = hass.data["zha"]["zha_gateway"]
-    except KeyError:
-        return False
+    async def async_zha_map_start(event):
+        async def async_get_zha_gateway():
+            tries = 10
 
-    builder = TopologyBuilder(hass, zha_gateway)
-    hass.data[DOMAIN] = {ATTR_TOPO: builder}
-    output_dir = os.path.join(hass.config.config_dir, CONFIG_OUTPUT_DIR_NAME)
-    hass.data[DOMAIN][ATTR_OUTPUT_DIR] = output_dir
+            while True:
+                try:
+                    zha_gateway = hass.data["zha"]["zha_gateway"]
+                    return zha_gateway
+                except KeyError as exception:
+                    tries = tries - 1
+                    if tries < 1:
+                        LOGGER.error("Giving up waiting for zha_gateway")
+                        raise exception
 
-    def mkdir(dir):
+                LOGGER.info("zha_gateway not available; trying again later")
+                await asyncio.sleep(10)
+
         try:
-            os.mkdir(dir)
-            return True
-        except OSError as exc:
-            LOGGER.error("Couldn't create '%s' dir: %s", dir, exc)
+            zha_gateway = await async_get_zha_gateway()
+        except KeyError:
             return False
 
-    if not os.path.isdir(output_dir):
-        if not await hass.async_add_executor_job(mkdir, output_dir):
-            return False
+        builder = TopologyBuilder(hass, zha_gateway)
+        hass.data[DOMAIN] = {ATTR_TOPO: builder}
+        output_dir = os.path.join(hass.config.config_dir, CONFIG_OUTPUT_DIR_NAME)
+        hass.data[DOMAIN][ATTR_OUTPUT_DIR] = output_dir
 
-    async def setup_scanner(_now):
-        async_track_time_interval(hass, builder.time_tracker, AWAKE_INTERVAL)
-        await builder.time_tracker()
+        def mkdir(dir):
+            try:
+                os.mkdir(dir)
+                return True
+            except OSError as exc:
+                LOGGER.error("Couldn't create '%s' dir: %s", dir, exc)
+                return False
 
-    async_call_later(hass, CONFIG_INITIAL_SCAN_DELAY, setup_scanner)
+        if not os.path.isdir(output_dir):
+            if not await hass.async_add_executor_job(mkdir, output_dir):
+                return False
 
-    async def scan_now_handler(service):
-        """Scan topology right now."""
-        await builder.preempt_build()
+        async def setup_scanner(_now):
+            async_track_time_interval(hass, builder.time_tracker, AWAKE_INTERVAL)
+            await builder.time_tracker()
 
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_SCAN_NOW,
-        scan_now_handler,
-        schema=SERVICE_SCHEMAS[SERVICE_SCAN_NOW],
-    )
+        async_call_later(hass, CONFIG_INITIAL_SCAN_DELAY, setup_scanner)
 
-    @websocket_api.require_admin
-    @websocket_api.async_response
-    @websocket_api.websocket_command({vol.Required(ATTR_TYPE): f"{DOMAIN}/devices"})
-    async def websocket_get_devices(hass, connection, msg):
-        """Get ZHA Map devices."""
+        async def scan_now_handler(service):
+            """Scan topology right now."""
+            await builder.preempt_build()
 
-        response = {
-            "time": builder.timestamp,
-            "devices": [nei.json() for nei in builder.current.values()],
-        }
-        connection.send_result(msg["id"], response)
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_SCAN_NOW,
+            scan_now_handler,
+            schema=SERVICE_SCHEMAS[SERVICE_SCAN_NOW],
+        )
 
-    websocket_api.async_register_command(hass, websocket_get_devices)
+        @websocket_api.require_admin
+        @websocket_api.async_response
+        @websocket_api.websocket_command({vol.Required(ATTR_TYPE): f"{DOMAIN}/devices"})
+        async def websocket_get_devices(hass, connection, msg):
+            """Get ZHA Map devices."""
+
+            response = {
+                "time": builder.timestamp,
+                "devices": [nei.json() for nei in builder.current.values()],
+            }
+            connection.send_result(msg["id"], response)
+
+        websocket_api.async_register_command(hass, websocket_get_devices)
+
+    hass.bus.async_listen_once(ha_const.EVENT_HOMEASSISTANT_START, async_zha_map_start)
+
+    return True
+
+
+async def async_setup_entry(hass, config_entry):
+    """Set up zha_map."""
+
+    LOGGER.info("in async_setup_entry")
 
     return True
 
